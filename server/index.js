@@ -1,36 +1,73 @@
-const express = require("express");
+import express, { json } from "express";
+import cors from "cors";
+import { secp256k1 } from "ethereum-cryptography/secp256k1";
+import { keccak256 } from "ethereum-cryptography/keccak";
+import { toHex } from "ethereum-cryptography/utils";
+import { randomBytes } from "crypto";
+
 const app = express();
-const cors = require("cors");
 const port = 3042;
 
 app.use(cors());
-app.use(express.json());
+app.use(json());
 
-const balances = {
-  "0x1": 100,
-  "0x2": 50,
-  "0x3": 75,
-};
+const balances = {};
 
-app.get("/balance/:address", (req, res) => {
-  const { address } = req.params;
-  const balance = balances[address] || 0;
-  res.send({ balance });
+app.get("/generate", (req, res) => {
+  const privateKey = randomBytes(32);
+  const publicKey = secp256k1.getPublicKey(privateKey, false).slice(1);
+  const address = keccak256(publicKey).slice(-20);
+  const privateKeyHex = toHex(privateKey);
+  const addressHex = toHex(address);
+
+  balances[addressHex] = 100;
+
+  res.send({
+    privateKey: privateKeyHex,
+    address: `0x${addressHex}`,
+    balance: balances[addressHex],
+  });
 });
 
 app.post("/send", (req, res) => {
-  const { sender, recipient, amount } = req.body;
+  const { signature, recId, amount, recipient } = req.body;
 
-  setInitialBalance(sender);
-  setInitialBalance(recipient);
+  const signatureBytes = Uint8Array.from(Buffer.from(signature, "hex"));
+  const recIdBytes = parseInt(recId, 16);
 
-  if (balances[sender] < amount) {
-    res.status(400).send({ message: "Not enough funds!" });
-  } else {
-    balances[sender] -= amount;
-    balances[recipient] += amount;
-    res.send({ balance: balances[sender] });
+  const publicKey = secp256k1.recover(signatureBytes, recIdBytes);
+
+  if (!secp256k1.verify(signatureBytes, publicKey)) {
+    return res
+      .status(400)
+      .send({ status: "error", message: "Signature is invalid" });
   }
+
+  const senderAddress = toHex(keccak256(publicKey).slice(-20));
+
+  if (!balances[senderAddress]) {
+    return res
+      .status(400)
+      .send({ status: "error", message: "Sender does not exist" });
+  }
+
+  if (balances[senderAddress] < amount) {
+    return res
+      .status(400)
+      .send({ status: "error", message: "Not enough funds" });
+  }
+
+  if (!balances[recipient]) {
+    setInitialBalance(recipient);
+  }
+
+  balances[senderAddress] -= amount;
+  balances[recipient] += amount;
+
+  res.send({
+    senderBalance: balances[senderAddress],
+    recipientBalance: balances[recipient],
+  });
 });
 
 app.listen(port, () => {
